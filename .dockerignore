@@ -1,0 +1,11 @@
+build/
+.vs/
+.idea/
+.git/
+resources/references.json.gz
+resources/example-references.json
+resources/example-references.bin
+*.obj
+*.exe
+*.pdb
+*.ilk
