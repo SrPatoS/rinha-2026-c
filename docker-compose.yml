@@ -1,14 +1,14 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:threshold-04
+    image: srvini/rinha-2026-c:kdtree-idx
     hostname: api1
     environment:
       PORT: "8080"
-      WORKERS: "${WORKERS:-32}"
+      WORKERS: "${WORKERS:-48}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
-      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.4}"
-      REFERENCES_PATH: /app/resources/references.bin
+      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
+      REFERENCES_PATH: /app/resources/references.idx
     deploy:
       resources:
         limits:
@@ -16,15 +16,15 @@ services:
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:threshold-04
+    image: srvini/rinha-2026-c:kdtree-idx
     hostname: api2
     environment:
       PORT: "8080"
-      WORKERS: "${WORKERS:-32}"
+      WORKERS: "${WORKERS:-48}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
-      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.4}"
-      REFERENCES_PATH: /app/resources/references.bin
+      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
+      REFERENCES_PATH: /app/resources/references.idx
     deploy:
       resources:
         limits:
