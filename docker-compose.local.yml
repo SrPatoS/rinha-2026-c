@@ -1,8 +1,0 @@
-services:
-  api1:
-    build: .
-    image: rinha-2026-c-local:latest
-
-  api2:
-    build: .
-    image: rinha-2026-c-local:latest

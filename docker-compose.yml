@@ -1,6 +1,6 @@
 services:
   api1:
-    image: ghcr.io/seu-usuario/rinha-2026-c:latest
+    image: srvini/rinha-2026-c:latest
     hostname: api1
     environment:
       PORT: "8080"
@@ -15,7 +15,7 @@ services:
           memory: "150MB"
 
   api2:
-    image: ghcr.io/seu-usuario/rinha-2026-c:latest
+    image: srvini/rinha-2026-c:latest
     hostname: api2
     environment:
       PORT: "8080"

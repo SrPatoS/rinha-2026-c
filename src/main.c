@@ -881,7 +881,7 @@ static bool handle_request(socket_handle_t client, const ReferenceSet *reference
         }
 
         float score = fraud_score_for_vector(references, vector);
-        bool approved = score < 0.4f;
+        bool approved = score < 0.6f;
         char response_body[128];
         snprintf(response_body, sizeof(response_body),
                  "{\"approved\":%s,\"fraud_score\":%.1f}",
