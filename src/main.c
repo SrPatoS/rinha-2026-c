@@ -76,6 +76,7 @@ typedef struct {
 
 static volatile sig_atomic_t running = 1;
 static uint32_t g_candidate_limit = DEFAULT_CANDIDATE_LIMIT;
+static float g_approval_threshold = 0.6f;
 
 static void on_signal(int signum) {
     (void)signum;
@@ -188,6 +189,18 @@ static uint32_t configured_candidate_limit(void) {
         return 1000000;
     }
     return (uint32_t)value;
+}
+
+static float configured_approval_threshold(void) {
+    const char *env = getenv("APPROVAL_THRESHOLD");
+    if (!env || env[0] == '\0') {
+        return 0.6f;
+    }
+    float value = strtof(env, NULL);
+    if (value <= 0.0f || value > 1.0f) {
+        return 0.6f;
+    }
+    return value;
 }
 
 static const char *skip_ws(const char *p) {
@@ -885,7 +898,7 @@ static bool handle_request(socket_handle_t client, const ReferenceSet *reference
         }
 
         float score = fraud_score_for_vector(references, vector);
-        bool approved = score < 0.6f;
+        bool approved = score < g_approval_threshold;
         char response_body[128];
         snprintf(response_body, sizeof(response_body),
                  "{\"approved\":%s,\"fraud_score\":%.1f}",
@@ -1000,6 +1013,7 @@ int main(void) {
         references_path = "resources/example-references.json";
     }
     g_candidate_limit = configured_candidate_limit();
+    g_approval_threshold = configured_approval_threshold();
 
     ReferenceSet references = {0};
     if (!load_references(references_path, &references)) {
@@ -1020,8 +1034,8 @@ int main(void) {
     }
 
     unsigned workers = configured_workers();
-    fprintf(stderr, "rinha-api listening on :%u with %zu references, %u workers and %u candidates\n",
-            port, references.count, workers, g_candidate_limit);
+    fprintf(stderr, "rinha-api listening on :%u with %zu references, %u workers, %u candidates and %.2f threshold\n",
+            port, references.count, workers, g_candidate_limit, g_approval_threshold);
 
 #ifdef _WIN32
     accept_loop(server, &references);
