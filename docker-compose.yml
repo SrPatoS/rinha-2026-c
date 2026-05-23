@@ -31,10 +31,12 @@ services:
           cpus: "${API_CPUS:-0.40}"
           memory: "${API_MEMORY:-150MB}"
 
-  nginx:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+  lb:
+    image: srvini/rinha-2026-c:rust-lb
+    command: ["/app/rinha-lb"]
+    environment:
+      PORT: "9999"
+      BACKEND_POOL: "${BACKEND_POOL:-16}"
     ports:
       - "9999:9999"
     depends_on:
@@ -43,8 +45,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${NGINX_CPUS:-0.20}"
-          memory: "${NGINX_MEMORY:-50MB}"
+          cpus: "${LB_CPUS:-0.20}"
+          memory: "${LB_MEMORY:-50MB}"
 
 networks:
   default:
