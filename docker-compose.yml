@@ -4,30 +4,30 @@ services:
     hostname: api1
     environment:
       PORT: "8080"
-      WORKERS: "192"
-      MAX_REFERENCES: "0"
-      CANDIDATE_LIMIT: "3000"
+      WORKERS: "${WORKERS:-192}"
+      MAX_REFERENCES: "${MAX_REFERENCES:-0}"
+      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-5000}"
       REFERENCES_PATH: /app/resources/references.bin
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: "150MB"
+          cpus: "${API_CPUS:-0.40}"
+          memory: "${API_MEMORY:-150MB}"
 
   api2:
     image: srvini/rinha-2026-c:latest
     hostname: api2
     environment:
       PORT: "8080"
-      WORKERS: "192"
-      MAX_REFERENCES: "0"
-      CANDIDATE_LIMIT: "3000"
+      WORKERS: "${WORKERS:-192}"
+      MAX_REFERENCES: "${MAX_REFERENCES:-0}"
+      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-5000}"
       REFERENCES_PATH: /app/resources/references.bin
     deploy:
       resources:
         limits:
-          cpus: "0.40"
-          memory: "150MB"
+          cpus: "${API_CPUS:-0.40}"
+          memory: "${API_MEMORY:-150MB}"
 
   nginx:
     image: nginx:1.27-alpine
@@ -41,8 +41,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          memory: "50MB"
+          cpus: "${NGINX_CPUS:-0.20}"
+          memory: "${NGINX_MEMORY:-50MB}"
 
 networks:
   default:
