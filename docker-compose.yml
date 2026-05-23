@@ -4,9 +4,9 @@ services:
     hostname: api1
     environment:
       PORT: "8080"
-      WORKERS: "${WORKERS:-16}"
+      WORKERS: "${WORKERS:-32}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
-      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-5000}"
+      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
       REFERENCES_PATH: /app/resources/references.bin
     deploy:
       resources:
@@ -19,9 +19,9 @@ services:
     hostname: api2
     environment:
       PORT: "8080"
-      WORKERS: "${WORKERS:-16}"
+      WORKERS: "${WORKERS:-32}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
-      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-5000}"
+      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
       REFERENCES_PATH: /app/resources/references.bin
     deploy:
       resources:
