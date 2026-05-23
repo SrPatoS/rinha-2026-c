@@ -1,6 +1,6 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:latest
+    image: srvini/rinha-2026-c:threshold-04
     hostname: api1
     environment:
       PORT: "8080"
@@ -16,7 +16,7 @@ services:
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:latest
+    image: srvini/rinha-2026-c:threshold-04
     hostname: api2
     environment:
       PORT: "8080"
