@@ -7,6 +7,7 @@ services:
       WORKERS: "${WORKERS:-32}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
+      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.4}"
       REFERENCES_PATH: /app/resources/references.bin
     deploy:
       resources:
@@ -22,6 +23,7 @@ services:
       WORKERS: "${WORKERS:-32}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
+      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.4}"
       REFERENCES_PATH: /app/resources/references.bin
     deploy:
       resources:
