@@ -36,6 +36,7 @@ typedef int socket_handle_t;
 #define RESPONSE_BUFFER_SIZE 512
 #define VECTOR_SCALE 10000.0f
 #define INDEX_BUCKETS 131072u
+#define KD_PARTITIONS 256u
 #define DEFAULT_CANDIDATE_LIMIT 3000u
 
 typedef struct {
@@ -44,8 +45,27 @@ typedef struct {
 } Reference;
 
 typedef struct {
+    int32_t left;
+    int32_t right;
+    uint32_t start;
+    uint32_t count;
+    int16_t min[VECTOR_DIMS];
+    int16_t max[VECTOR_DIMS];
+} KdNode;
+
+typedef struct {
+    uint32_t root;
+    uint32_t start;
+    uint32_t count;
+} KdPartition;
+
+typedef struct {
     Reference *items;
     uint32_t *bucket_offsets;
+    uint32_t *kd_indices;
+    KdNode *kd_nodes;
+    KdPartition kd_partitions[KD_PARTITIONS];
+    uint32_t kd_node_count;
     size_t count;
     size_t capacity;
 } ReferenceSet;
@@ -137,6 +157,17 @@ static uint32_t bucket_key(const int16_t vector[VECTOR_DIMS]) {
     unsigned unknown = vector[11] >= 5000 ? 1u : 0u;
     unsigned mcc = bin_01(vector[12], 8);
     return bucket_key_from_bins(amount, hour, tx_count, online, card, unknown, mcc);
+}
+
+static uint32_t kd_partition_key(const int16_t vector[VECTOR_DIMS]) {
+    uint32_t key = vector[5] < 0 ? 1u : 0u;
+    key |= (vector[9] > 0 ? 1u : 0u) << 1u;
+    key |= (vector[10] > 0 ? 1u : 0u) << 2u;
+    key |= (vector[11] > 0 ? 1u : 0u) << 3u;
+    key |= bin_01(vector[12], 4) << 4u;
+    key |= (vector[2] >= 8500 ? 1u : 0u) << 6u;
+    key |= (vector[8] >= 4000 ? 1u : 0u) << 7u;
+    return key;
 }
 
 static bool build_index(ReferenceSet *set) {
@@ -585,6 +616,53 @@ static bool load_binary_references(const char *path, ReferenceSet *set) {
     return set->count > 0;
 }
 
+static bool load_kd_index(const char *path, ReferenceSet *set) {
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        return false;
+    }
+    char magic[4];
+    uint32_t version = 0;
+    uint32_t count = 0;
+    uint32_t node_count = 0;
+    if (fread(magic, 1, 4, file) != 4 ||
+        memcmp(magic, "R26K", 4) != 0 ||
+        fread(&version, 4, 1, file) != 1 ||
+        fread(&count, 4, 1, file) != 1 ||
+        fread(&node_count, 4, 1, file) != 1 ||
+        version != 1u) {
+        fclose(file);
+        return false;
+    }
+    set->count = count;
+    set->capacity = count;
+    set->kd_node_count = node_count;
+    set->kd_nodes = malloc((size_t)node_count * sizeof(*set->kd_nodes));
+    set->kd_indices = malloc((size_t)count * sizeof(*set->kd_indices));
+    set->items = malloc((size_t)count * sizeof(*set->items));
+    if (!set->kd_nodes || !set->kd_indices || !set->items) {
+        fclose(file);
+        free(set->kd_nodes);
+        free(set->kd_indices);
+        free(set->items);
+        memset(set, 0, sizeof(*set));
+        return false;
+    }
+    if (fread(set->kd_partitions, sizeof(set->kd_partitions[0]), KD_PARTITIONS, file) != KD_PARTITIONS ||
+        fread(set->kd_nodes, sizeof(set->kd_nodes[0]), node_count, file) != node_count ||
+        fread(set->kd_indices, sizeof(set->kd_indices[0]), count, file) != count ||
+        fread(set->items, sizeof(set->items[0]), count, file) != count) {
+        fclose(file);
+        free(set->kd_nodes);
+        free(set->kd_indices);
+        free(set->items);
+        memset(set, 0, sizeof(*set));
+        return false;
+    }
+    fclose(file);
+    return true;
+}
+
 static bool load_json_references(const char *path, ReferenceSet *set) {
     FILE *file = fopen(path, "rb");
     if (!file) {
@@ -656,6 +734,9 @@ static bool load_json_references(const char *path, ReferenceSet *set) {
 }
 
 static bool load_references(const char *path, ReferenceSet *set) {
+    if (load_kd_index(path, set)) {
+        return true;
+    }
     if (load_binary_references(path, set)) {
         build_index(set);
         return true;
@@ -709,6 +790,101 @@ static float score_from_neighbors(const uint64_t best_dist[K_NEIGHBORS], const u
     return (float)frauds / (float)neighbors;
 }
 
+static uint64_t worst_distance(const uint64_t best_dist[K_NEIGHBORS]) {
+    uint64_t worst = best_dist[0];
+    for (int i = 1; i < K_NEIGHBORS; i++) {
+        if (best_dist[i] > worst) {
+            worst = best_dist[i];
+        }
+    }
+    return worst;
+}
+
+static uint64_t kd_bounds_distance(const int16_t query[VECTOR_DIMS], const int16_t min[VECTOR_DIMS],
+                                   const int16_t max[VECTOR_DIMS], uint64_t limit) {
+    uint64_t sum = 0;
+    for (int i = 0; i < VECTOR_DIMS; i++) {
+        int diff = 0;
+        if (query[i] < min[i]) {
+            diff = (int)min[i] - (int)query[i];
+        } else if (query[i] > max[i]) {
+            diff = (int)query[i] - (int)max[i];
+        }
+        sum += (uint64_t)(diff * diff);
+        if (sum >= limit) {
+            return sum;
+        }
+    }
+    return sum;
+}
+
+static void kd_search_node(const ReferenceSet *set, int32_t node_index, const int16_t query[VECTOR_DIMS],
+                           uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS]) {
+    if (node_index < 0 || (uint32_t)node_index >= set->kd_node_count) {
+        return;
+    }
+
+    const KdNode *node = &set->kd_nodes[node_index];
+    uint64_t worst = worst_distance(best_dist);
+    if (kd_bounds_distance(query, node->min, node->max, worst) > worst) {
+        return;
+    }
+
+    if (node->count > 0) {
+        uint32_t end = node->start + node->count;
+        for (uint32_t pos = node->start; pos < end; pos++) {
+            uint32_t ref_index = set->kd_indices[pos];
+            if (ref_index < set->count) {
+                consider_neighbor(&set->items[ref_index], query, best_dist, best_fraud);
+            }
+        }
+        return;
+    }
+
+    int32_t left = node->left;
+    int32_t right = node->right;
+    if (left < 0) {
+        kd_search_node(set, right, query, best_dist, best_fraud);
+        return;
+    }
+    if (right < 0) {
+        kd_search_node(set, left, query, best_dist, best_fraud);
+        return;
+    }
+
+    const KdNode *left_node = &set->kd_nodes[left];
+    const KdNode *right_node = &set->kd_nodes[right];
+    uint64_t left_dist = kd_bounds_distance(query, left_node->min, left_node->max, worst_distance(best_dist));
+    uint64_t right_dist = kd_bounds_distance(query, right_node->min, right_node->max, worst_distance(best_dist));
+    if (right_dist < left_dist) {
+        kd_search_node(set, right, query, best_dist, best_fraud);
+        kd_search_node(set, left, query, best_dist, best_fraud);
+    } else {
+        kd_search_node(set, left, query, best_dist, best_fraud);
+        kd_search_node(set, right, query, best_dist, best_fraud);
+    }
+}
+
+static void kd_search(const ReferenceSet *set, const int16_t query[VECTOR_DIMS],
+                      uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS]) {
+    uint32_t primary = kd_partition_key(query);
+    if (primary < KD_PARTITIONS && set->kd_partitions[primary].root != UINT32_MAX) {
+        kd_search_node(set, (int32_t)set->kd_partitions[primary].root, query, best_dist, best_fraud);
+    }
+
+    for (uint32_t p = 0; p < KD_PARTITIONS; p++) {
+        if (p == primary || set->kd_partitions[p].root == UINT32_MAX) {
+            continue;
+        }
+        int32_t root = (int32_t)set->kd_partitions[p].root;
+        const KdNode *node = &set->kd_nodes[root];
+        uint64_t worst = worst_distance(best_dist);
+        if (kd_bounds_distance(query, node->min, node->max, worst) <= worst) {
+            kd_search_node(set, root, query, best_dist, best_fraud);
+        }
+    }
+}
+
 static size_t scan_bucket(const ReferenceSet *set, uint32_t key, const int16_t query[VECTOR_DIMS],
                           uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS],
                           size_t remaining) {
@@ -737,6 +913,11 @@ static float fraud_score_for_vector(const ReferenceSet *set, const float vector[
     for (int i = 0; i < K_NEIGHBORS; i++) {
         best_dist[i] = UINT64_MAX;
         best_fraud[i] = 0;
+    }
+
+    if (set->kd_nodes) {
+        kd_search(set, query, best_dist, best_fraud);
+        return score_from_neighbors(best_dist, best_fraud);
     }
 
     if (set->bucket_offsets) {
@@ -1026,6 +1207,8 @@ int main(void) {
 
     socket_handle_t server = listen_on(port);
     if (SOCKET_IS_INVALID(server)) {
+        free(references.kd_nodes);
+        free(references.kd_indices);
         free(references.items);
 #ifdef _WIN32
         WSACleanup();
@@ -1044,6 +1227,8 @@ int main(void) {
     WorkerArgs args = {.server = server, .references = &references};
     if (!threads) {
         CLOSE_SOCKET(server);
+        free(references.kd_nodes);
+        free(references.kd_indices);
         free(references.items);
         return 1;
     }
@@ -1066,6 +1251,8 @@ int main(void) {
 #endif
 
     CLOSE_SOCKET(server);
+    free(references.kd_nodes);
+    free(references.kd_indices);
     free(references.bucket_offsets);
     free(references.items);
 #ifdef _WIN32

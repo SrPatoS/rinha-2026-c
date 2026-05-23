@@ -19,6 +19,7 @@ obj/
 
 # Local/generated challenge data
 resources/references.bin
+resources/references.idx
 resources/references.json
 resources/references.json.gz
 bench-results/
