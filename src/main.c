@@ -75,6 +75,7 @@ typedef struct {
 } Transaction;
 
 static volatile sig_atomic_t running = 1;
+static uint32_t g_candidate_limit = DEFAULT_CANDIDATE_LIMIT;
 
 static void on_signal(int signum) {
     (void)signum;
@@ -653,24 +654,27 @@ static bool load_references(const char *path, ReferenceSet *set) {
     return false;
 }
 
-static uint64_t squared_distance(const int16_t a[VECTOR_DIMS], const int16_t b[VECTOR_DIMS]) {
+static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int16_t b[VECTOR_DIMS], uint64_t limit) {
     uint64_t sum = 0;
     for (int i = 0; i < VECTOR_DIMS; i++) {
         int diff = (int)a[i] - (int)b[i];
         sum += (uint64_t)(diff * diff);
+        if (sum >= limit) {
+            return sum;
+        }
     }
     return sum;
 }
 
 static void consider_neighbor(const Reference *reference, const int16_t query[VECTOR_DIMS],
                               uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS]) {
-    uint64_t dist = squared_distance(query, reference->vector);
     int worst = 0;
     for (int k = 1; k < K_NEIGHBORS; k++) {
         if (best_dist[k] > best_dist[worst]) {
             worst = k;
         }
     }
+    uint64_t dist = squared_distance_limited(query, reference->vector, best_dist[worst]);
     if (dist < best_dist[worst]) {
         best_dist[worst] = dist;
         best_fraud[worst] = reference->fraud;
@@ -732,7 +736,7 @@ static float fraud_score_for_vector(const ReferenceSet *set, const float vector[
         unsigned mcc = bin_01(query[12], 8);
 
         size_t scanned = 0;
-        size_t limit = configured_candidate_limit();
+        size_t limit = g_candidate_limit;
         for (int radius = 0; radius <= 1; radius++) {
             for (int da = -radius; da <= radius; da++) {
                 int ba = (int)amount + da;
@@ -995,6 +999,7 @@ int main(void) {
     if (!references_path) {
         references_path = "resources/example-references.json";
     }
+    g_candidate_limit = configured_candidate_limit();
 
     ReferenceSet references = {0};
     if (!load_references(references_path, &references)) {
@@ -1015,8 +1020,8 @@ int main(void) {
     }
 
     unsigned workers = configured_workers();
-    fprintf(stderr, "rinha-api listening on :%u with %zu references and %u workers\n",
-            port, references.count, workers);
+    fprintf(stderr, "rinha-api listening on :%u with %zu references, %u workers and %u candidates\n",
+            port, references.count, workers, g_candidate_limit);
 
 #ifdef _WIN32
     accept_loop(server, &references);

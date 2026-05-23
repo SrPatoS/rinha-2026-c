@@ -21,6 +21,7 @@ obj/
 resources/references.bin
 resources/references.json
 resources/references.json.gz
+bench-results/
 
 # IDE/editor state
 .vs/
