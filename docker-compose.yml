@@ -4,7 +4,7 @@ services:
     hostname: api1
     environment:
       PORT: "8080"
-      WORKERS: "${WORKERS:-48}"
+      WORKERS: "${WORKERS:-20}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
       APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
@@ -20,7 +20,7 @@ services:
     hostname: api2
     environment:
       PORT: "8080"
-      WORKERS: "${WORKERS:-48}"
+      WORKERS: "${WORKERS:-20}"
       MAX_REFERENCES: "${MAX_REFERENCES:-0}"
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
       APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
@@ -36,7 +36,7 @@ services:
     command: ["/app/rinha-lb"]
     environment:
       PORT: "9999"
-      BACKEND_POOL: "${BACKEND_POOL:-16}"
+      BACKEND_POOL: "${BACKEND_POOL:-8}"
     ports:
       - "9999:9999"
     depends_on:
