@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS ?= -O3 -std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE -pthread
+CFLAGS ?= -O3 -march=x86-64-v2 -std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE -pthread
 LDFLAGS ?= -lm -pthread
 
 BIN := build/rinha-api

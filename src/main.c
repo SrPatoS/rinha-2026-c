@@ -25,6 +25,9 @@ typedef SOCKET socket_handle_t;
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#if defined(__x86_64__) || defined(__amd64__)
+#include <immintrin.h>
+#endif
 typedef int socket_handle_t;
 #define CLOSE_SOCKET close
 #define SOCKET_IS_INVALID(s) ((s) < 0)
@@ -749,6 +752,32 @@ static bool load_references(const char *path, ReferenceSet *set) {
 }
 
 static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int16_t b[VECTOR_DIMS], uint64_t limit) {
+#if (defined(__x86_64__) || defined(__amd64__)) && defined(__SSE4_1__)
+    (void)limit;
+    __m128i av0 = _mm_loadu_si128((const __m128i *)(const void *)a);
+    __m128i bv0 = _mm_loadu_si128((const __m128i *)(const void *)b);
+    int16_t tail_a[8] = {0};
+    int16_t tail_b[8] = {0};
+    memcpy(tail_a, a + 8, 6 * sizeof(int16_t));
+    memcpy(tail_b, b + 8, 6 * sizeof(int16_t));
+    __m128i av1 = _mm_loadu_si128((const __m128i *)(const void *)tail_a);
+    __m128i bv1 = _mm_loadu_si128((const __m128i *)(const void *)tail_b);
+
+    __m128i d0 = _mm_sub_epi16(av0, bv0);
+    __m128i d1 = _mm_sub_epi16(av1, bv1);
+    __m128i lo0 = _mm_cvtepi16_epi32(d0);
+    __m128i hi0 = _mm_cvtepi16_epi32(_mm_srli_si128(d0, 8));
+    __m128i lo1 = _mm_cvtepi16_epi32(d1);
+    __m128i hi1 = _mm_cvtepi16_epi32(_mm_srli_si128(d1, 8));
+    lo0 = _mm_mullo_epi32(lo0, lo0);
+    hi0 = _mm_mullo_epi32(hi0, hi0);
+    lo1 = _mm_mullo_epi32(lo1, lo1);
+    hi1 = _mm_mullo_epi32(hi1, hi1);
+    __m128i sum = _mm_add_epi32(_mm_add_epi32(lo0, hi0), _mm_add_epi32(lo1, hi1));
+    sum = _mm_hadd_epi32(sum, sum);
+    sum = _mm_hadd_epi32(sum, sum);
+    return (uint64_t)(uint32_t)_mm_cvtsi128_si32(sum);
+#else
     uint64_t sum = 0;
     for (int i = 0; i < VECTOR_DIMS; i++) {
         int diff = (int)a[i] - (int)b[i];
@@ -758,6 +787,7 @@ static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int
         }
     }
     return sum;
+#endif
 }
 
 static void consider_neighbor(const Reference *reference, const int16_t query[VECTOR_DIMS],
