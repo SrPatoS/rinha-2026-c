@@ -5,7 +5,7 @@
 
 #define DIMS 14
 #define PARTITIONS 256u
-#define LEAF_SIZE 128u
+#define LEAF_SIZE 32u
 #define MAGIC "R26K"
 #define VERSION 1u
 
@@ -106,9 +106,11 @@ static int32_t build_node(uint32_t start, uint32_t count) {
     sort_axis = axis;
     qsort(ids + start, count, sizeof(*ids), cmp_axis);
     uint32_t left = count / 2u;
+    int32_t left_node = build_node(start, left);
+    int32_t right_node = build_node(start + left, count - left);
     n = &nodes[ni];
-    n->left = build_node(start, left);
-    n->right = build_node(start + left, count - left);
+    n->left = left_node;
+    n->right = right_node;
     n->start = 0;
     n->count = 0;
     return ni;

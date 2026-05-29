@@ -43,6 +43,7 @@ typedef int socket_handle_t;
 #define DEFAULT_CANDIDATE_LIMIT 3000u
 #define MAX_EPOLL_EVENTS 512
 #define MAX_EPOLL_FDS 65536
+#define PROFILE_BUCKETS 32
 
 typedef struct {
     int16_t vector[VECTOR_DIMS];
@@ -80,6 +81,12 @@ typedef struct {
     const ReferenceSet *references;
 } WorkerArgs;
 
+typedef struct {
+    uint64_t dist[K_NEIGHBORS];
+    uint8_t fraud[K_NEIGHBORS];
+    int worst;
+} NeighborSet;
+
 #ifndef _WIN32
 typedef struct {
     char buffer[READ_BUFFER_SIZE];
@@ -109,10 +116,106 @@ typedef struct {
 static volatile sig_atomic_t running = 1;
 static uint32_t g_candidate_limit = DEFAULT_CANDIDATE_LIMIT;
 static float g_approval_threshold = 0.6f;
+static uint64_t g_profile_every = 0;
+static uint64_t g_profile_count = 0;
+static uint64_t g_profile_total_ns = 0;
+static uint64_t g_profile_parse_ns = 0;
+static uint64_t g_profile_vector_ns = 0;
+static uint64_t g_profile_search_ns = 0;
+static uint64_t g_profile_send_ns = 0;
+static uint64_t g_profile_total_hist[PROFILE_BUCKETS];
+static uint64_t g_profile_search_hist[PROFILE_BUCKETS];
+static uint64_t g_profile_send_hist[PROFILE_BUCKETS];
 
 static void on_signal(int signum) {
     (void)signum;
     running = 0;
+}
+
+static uint64_t now_ns(void) {
+#ifdef _WIN32
+    return 0;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+static unsigned profile_bucket(uint64_t ns) {
+    uint64_t us = ns / 1000u;
+    unsigned bucket = 0;
+    while (us > 1u && bucket + 1u < PROFILE_BUCKETS) {
+        us >>= 1u;
+        bucket++;
+    }
+    return bucket;
+}
+
+static uint64_t profile_percentile_us(uint64_t hist[PROFILE_BUCKETS], uint64_t total, unsigned percentile) {
+    if (total == 0) {
+        return 0;
+    }
+    uint64_t target = (total * percentile + 99u) / 100u;
+    uint64_t seen = 0;
+    for (unsigned i = 0; i < PROFILE_BUCKETS; i++) {
+        seen += hist[i];
+        if (seen >= target) {
+            return i == 0 ? 1u : (1ull << i);
+        }
+    }
+    return 1ull << (PROFILE_BUCKETS - 1u);
+}
+
+static void profile_add(uint64_t total_ns, uint64_t parse_ns, uint64_t vector_ns, uint64_t search_ns, uint64_t send_ns) {
+    if (!g_profile_every) {
+        return;
+    }
+    uint64_t count = __atomic_add_fetch(&g_profile_count, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_total_ns, total_ns, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_parse_ns, parse_ns, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_vector_ns, vector_ns, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_search_ns, search_ns, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_send_ns, send_ns, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_total_hist[profile_bucket(total_ns)], 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_search_hist[profile_bucket(search_ns)], 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_profile_send_hist[profile_bucket(send_ns)], 1, __ATOMIC_RELAXED);
+    if (count % g_profile_every == 0) {
+        uint64_t total = __atomic_exchange_n(&g_profile_total_ns, 0, __ATOMIC_RELAXED);
+        uint64_t parse = __atomic_exchange_n(&g_profile_parse_ns, 0, __ATOMIC_RELAXED);
+        uint64_t vector = __atomic_exchange_n(&g_profile_vector_ns, 0, __ATOMIC_RELAXED);
+        uint64_t search = __atomic_exchange_n(&g_profile_search_ns, 0, __ATOMIC_RELAXED);
+        uint64_t send_time = __atomic_exchange_n(&g_profile_send_ns, 0, __ATOMIC_RELAXED);
+        uint64_t total_hist[PROFILE_BUCKETS];
+        uint64_t search_hist[PROFILE_BUCKETS];
+        uint64_t send_hist[PROFILE_BUCKETS];
+        uint64_t window = 0;
+        for (unsigned i = 0; i < PROFILE_BUCKETS; i++) {
+            total_hist[i] = __atomic_exchange_n(&g_profile_total_hist[i], 0, __ATOMIC_RELAXED);
+            search_hist[i] = __atomic_exchange_n(&g_profile_search_hist[i], 0, __ATOMIC_RELAXED);
+            send_hist[i] = __atomic_exchange_n(&g_profile_send_hist[i], 0, __ATOMIC_RELAXED);
+            window += total_hist[i];
+        }
+        fprintf(stderr,
+                "profile n=%llu avg_us total=%.2f parse=%.2f vector=%.2f search=%.2f send=%.2f other=%.2f "
+                "p_us total=%llu/%llu/%llu search=%llu/%llu/%llu send=%llu/%llu/%llu\n",
+                (unsigned long long)count,
+                (double)total / (double)g_profile_every / 1000.0,
+                (double)parse / (double)g_profile_every / 1000.0,
+                (double)vector / (double)g_profile_every / 1000.0,
+                (double)search / (double)g_profile_every / 1000.0,
+                (double)send_time / (double)g_profile_every / 1000.0,
+                (double)(total - parse - vector - search - send_time) / (double)g_profile_every / 1000.0,
+                (unsigned long long)profile_percentile_us(total_hist, window, 50),
+                (unsigned long long)profile_percentile_us(total_hist, window, 95),
+                (unsigned long long)profile_percentile_us(total_hist, window, 99),
+                (unsigned long long)profile_percentile_us(search_hist, window, 50),
+                (unsigned long long)profile_percentile_us(search_hist, window, 95),
+                (unsigned long long)profile_percentile_us(search_hist, window, 99),
+                (unsigned long long)profile_percentile_us(send_hist, window, 50),
+                (unsigned long long)profile_percentile_us(send_hist, window, 95),
+                (unsigned long long)profile_percentile_us(send_hist, window, 99));
+    }
 }
 
 static float clamp01(double value) {
@@ -772,44 +875,47 @@ static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int
     return sum;
 }
 
-static void consider_neighbor(const Reference *reference, const int16_t query[VECTOR_DIMS],
-                              uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS]) {
+static void neighbors_init(NeighborSet *neighbors) {
+    for (int i = 0; i < K_NEIGHBORS; i++) {
+        neighbors->dist[i] = UINT64_MAX;
+        neighbors->fraud[i] = 0;
+    }
+    neighbors->worst = 0;
+}
+
+static void neighbors_refresh_worst(NeighborSet *neighbors) {
     int worst = 0;
     for (int k = 1; k < K_NEIGHBORS; k++) {
-        if (best_dist[k] > best_dist[worst]) {
+        if (neighbors->dist[k] > neighbors->dist[worst]) {
             worst = k;
         }
     }
-    uint64_t dist = squared_distance_limited(query, reference->vector, best_dist[worst]);
-    if (dist < best_dist[worst]) {
-        best_dist[worst] = dist;
-        best_fraud[worst] = reference->fraud;
+    neighbors->worst = worst;
+}
+
+static void consider_neighbor(const Reference *reference, const int16_t query[VECTOR_DIMS], NeighborSet *neighbors) {
+    int worst = neighbors->worst;
+    uint64_t dist = squared_distance_limited(query, reference->vector, neighbors->dist[worst]);
+    if (dist < neighbors->dist[worst]) {
+        neighbors->dist[worst] = dist;
+        neighbors->fraud[worst] = reference->fraud;
+        neighbors_refresh_worst(neighbors);
     }
 }
 
-static float score_from_neighbors(const uint64_t best_dist[K_NEIGHBORS], const uint8_t best_fraud[K_NEIGHBORS]) {
+static float score_from_neighbors(const NeighborSet *neighbors) {
     int frauds = 0;
-    int neighbors = 0;
+    int count = 0;
     for (int i = 0; i < K_NEIGHBORS; i++) {
-        if (best_dist[i] != UINT64_MAX) {
-            frauds += best_fraud[i] ? 1 : 0;
-            neighbors++;
+        if (neighbors->dist[i] != UINT64_MAX) {
+            frauds += neighbors->fraud[i] ? 1 : 0;
+            count++;
         }
     }
-    if (neighbors == 0) {
+    if (count == 0) {
         return 0.0f;
     }
-    return (float)frauds / (float)neighbors;
-}
-
-static uint64_t worst_distance(const uint64_t best_dist[K_NEIGHBORS]) {
-    uint64_t worst = best_dist[0];
-    for (int i = 1; i < K_NEIGHBORS; i++) {
-        if (best_dist[i] > worst) {
-            worst = best_dist[i];
-        }
-    }
-    return worst;
+    return (float)frauds / (float)count;
 }
 
 static uint64_t kd_bounds_distance(const int16_t query[VECTOR_DIMS], const int16_t min[VECTOR_DIMS],
@@ -831,13 +937,13 @@ static uint64_t kd_bounds_distance(const int16_t query[VECTOR_DIMS], const int16
 }
 
 static void kd_search_node(const ReferenceSet *set, int32_t node_index, const int16_t query[VECTOR_DIMS],
-                           uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS]) {
+                           NeighborSet *neighbors) {
     if (node_index < 0 || (uint32_t)node_index >= set->kd_node_count) {
         return;
     }
 
     const KdNode *node = &set->kd_nodes[node_index];
-    uint64_t worst = worst_distance(best_dist);
+    uint64_t worst = neighbors->dist[neighbors->worst];
     if (kd_bounds_distance(query, node->min, node->max, worst) > worst) {
         return;
     }
@@ -847,7 +953,7 @@ static void kd_search_node(const ReferenceSet *set, int32_t node_index, const in
         for (uint32_t pos = node->start; pos < end; pos++) {
             uint32_t ref_index = set->kd_indices[pos];
             if (ref_index < set->count) {
-                consider_neighbor(&set->items[ref_index], query, best_dist, best_fraud);
+                consider_neighbor(&set->items[ref_index], query, neighbors);
             }
         }
         return;
@@ -856,32 +962,31 @@ static void kd_search_node(const ReferenceSet *set, int32_t node_index, const in
     int32_t left = node->left;
     int32_t right = node->right;
     if (left < 0) {
-        kd_search_node(set, right, query, best_dist, best_fraud);
+        kd_search_node(set, right, query, neighbors);
         return;
     }
     if (right < 0) {
-        kd_search_node(set, left, query, best_dist, best_fraud);
+        kd_search_node(set, left, query, neighbors);
         return;
     }
 
     const KdNode *left_node = &set->kd_nodes[left];
     const KdNode *right_node = &set->kd_nodes[right];
-    uint64_t left_dist = kd_bounds_distance(query, left_node->min, left_node->max, worst_distance(best_dist));
-    uint64_t right_dist = kd_bounds_distance(query, right_node->min, right_node->max, worst_distance(best_dist));
+    uint64_t left_dist = kd_bounds_distance(query, left_node->min, left_node->max, neighbors->dist[neighbors->worst]);
+    uint64_t right_dist = kd_bounds_distance(query, right_node->min, right_node->max, neighbors->dist[neighbors->worst]);
     if (right_dist < left_dist) {
-        kd_search_node(set, right, query, best_dist, best_fraud);
-        kd_search_node(set, left, query, best_dist, best_fraud);
+        kd_search_node(set, right, query, neighbors);
+        kd_search_node(set, left, query, neighbors);
     } else {
-        kd_search_node(set, left, query, best_dist, best_fraud);
-        kd_search_node(set, right, query, best_dist, best_fraud);
+        kd_search_node(set, left, query, neighbors);
+        kd_search_node(set, right, query, neighbors);
     }
 }
 
-static void kd_search(const ReferenceSet *set, const int16_t query[VECTOR_DIMS],
-                      uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS]) {
+static void kd_search(const ReferenceSet *set, const int16_t query[VECTOR_DIMS], NeighborSet *neighbors) {
     uint32_t primary = kd_partition_key(query);
     if (primary < KD_PARTITIONS && set->kd_partitions[primary].root != UINT32_MAX) {
-        kd_search_node(set, (int32_t)set->kd_partitions[primary].root, query, best_dist, best_fraud);
+        kd_search_node(set, (int32_t)set->kd_partitions[primary].root, query, neighbors);
     }
 
     for (uint32_t p = 0; p < KD_PARTITIONS; p++) {
@@ -890,15 +995,15 @@ static void kd_search(const ReferenceSet *set, const int16_t query[VECTOR_DIMS],
         }
         int32_t root = (int32_t)set->kd_partitions[p].root;
         const KdNode *node = &set->kd_nodes[root];
-        uint64_t worst = worst_distance(best_dist);
+        uint64_t worst = neighbors->dist[neighbors->worst];
         if (kd_bounds_distance(query, node->min, node->max, worst) <= worst) {
-            kd_search_node(set, root, query, best_dist, best_fraud);
+            kd_search_node(set, root, query, neighbors);
         }
     }
 }
 
 static size_t scan_bucket(const ReferenceSet *set, uint32_t key, const int16_t query[VECTOR_DIMS],
-                          uint64_t best_dist[K_NEIGHBORS], uint8_t best_fraud[K_NEIGHBORS],
+                          NeighborSet *neighbors,
                           size_t remaining) {
     size_t scanned = 0;
     if (!set->bucket_offsets || key >= INDEX_BUCKETS || remaining == 0) {
@@ -907,7 +1012,7 @@ static size_t scan_bucket(const ReferenceSet *set, uint32_t key, const int16_t q
     uint32_t begin = set->bucket_offsets[key];
     uint32_t end = set->bucket_offsets[key + 1u];
     for (uint32_t index = begin; index < end; index++) {
-        consider_neighbor(&set->items[index], query, best_dist, best_fraud);
+        consider_neighbor(&set->items[index], query, neighbors);
         scanned++;
         if (scanned >= remaining) {
             break;
@@ -920,16 +1025,12 @@ static float fraud_score_for_vector(const ReferenceSet *set, const float vector[
     int16_t query[VECTOR_DIMS];
     quantize_vector(vector, query);
 
-    uint64_t best_dist[K_NEIGHBORS];
-    uint8_t best_fraud[K_NEIGHBORS];
-    for (int i = 0; i < K_NEIGHBORS; i++) {
-        best_dist[i] = UINT64_MAX;
-        best_fraud[i] = 0;
-    }
+    NeighborSet neighbors;
+    neighbors_init(&neighbors);
 
     if (set->kd_nodes) {
-        kd_search(set, query, best_dist, best_fraud);
-        return score_from_neighbors(best_dist, best_fraud);
+        kd_search(set, query, &neighbors);
+        return score_from_neighbors(&neighbors);
     }
 
     if (set->bucket_offsets) {
@@ -959,7 +1060,7 @@ static float fraud_score_for_vector(const ReferenceSet *set, const float vector[
                             if (radius > 0 && da == 0 && dh == 0 && dt == 0 && dm == 0) continue;
                             uint32_t key = bucket_key_from_bins((unsigned)ba, (unsigned)bh, (unsigned)bt,
                                                                 online, card, unknown, (unsigned)bm);
-                            scanned += scan_bucket(set, key, query, best_dist, best_fraud, limit - scanned);
+                            scanned += scan_bucket(set, key, query, &neighbors, limit - scanned);
                             if (scanned >= limit) {
                                 goto done_bucket_scan;
                             }
@@ -974,18 +1075,18 @@ done_bucket_scan:
             uint32_t stride = (uint32_t)(set->count / 4096u);
             if (stride == 0) stride = 1;
             for (uint32_t i = bucket_key(query) % stride; i < set->count; i += stride) {
-                consider_neighbor(&set->items[i], query, best_dist, best_fraud);
+                consider_neighbor(&set->items[i], query, &neighbors);
             }
         }
 
-        return score_from_neighbors(best_dist, best_fraud);
+        return score_from_neighbors(&neighbors);
     }
 
     for (size_t i = 0; i < set->count; i++) {
-        consider_neighbor(&set->items[i], query, best_dist, best_fraud);
+        consider_neighbor(&set->items[i], query, &neighbors);
     }
 
-    return score_from_neighbors(best_dist, best_fraud);
+    return score_from_neighbors(&neighbors);
 }
 
 static void send_response(socket_handle_t client, int status, const char *status_text, const char *content_type, const char *body, bool keep_alive) {
@@ -1074,10 +1175,21 @@ static void configure_client_socket(socket_handle_t client) {
 }
 
 static bool handle_request(socket_handle_t client, const ReferenceSet *references, char *buffer) {
+    bool prof = g_profile_every != 0;
+    uint64_t t0 = prof ? now_ns() : 0;
+    uint64_t parse_ns = 0;
+    uint64_t vector_ns = 0;
+    uint64_t search_ns = 0;
+    uint64_t send_ns = 0;
     bool keep_alive = !wants_close(buffer);
 
     if (strncmp(buffer, "GET /ready ", 11) == 0) {
+        uint64_t s0 = prof ? now_ns() : 0;
         send_response(client, 200, "OK", "application/json", "{\"status\":\"ready\"}", keep_alive);
+        if (prof) {
+            send_ns = now_ns() - s0;
+            profile_add(now_ns() - t0, 0, 0, 0, send_ns);
+        }
         return keep_alive;
     }
 
@@ -1085,22 +1197,45 @@ static bool handle_request(socket_handle_t client, const ReferenceSet *reference
         Transaction tx;
         float vector[VECTOR_DIMS];
         const char *body = request_body(buffer);
-        if (!parse_transaction(body, &tx) || !vectorize(&tx, vector)) {
+        uint64_t p0 = prof ? now_ns() : 0;
+        bool parsed = parse_transaction(body, &tx);
+        if (prof) parse_ns = now_ns() - p0;
+        uint64_t v0 = prof ? now_ns() : 0;
+        bool vectorized = parsed && vectorize(&tx, vector);
+        if (prof) vector_ns = now_ns() - v0;
+        if (!parsed || !vectorized) {
+            uint64_t s0 = prof ? now_ns() : 0;
             send_response(client, 400, "Bad Request", "application/json", "{\"error\":\"invalid payload\"}", keep_alive);
+            if (prof) {
+                send_ns = now_ns() - s0;
+                profile_add(now_ns() - t0, parse_ns, vector_ns, 0, send_ns);
+            }
             return keep_alive;
         }
 
+        uint64_t k0 = prof ? now_ns() : 0;
         float score = fraud_score_for_vector(references, vector);
+        if (prof) search_ns = now_ns() - k0;
         bool approved = score < g_approval_threshold;
         char response_body[128];
         snprintf(response_body, sizeof(response_body),
                  "{\"approved\":%s,\"fraud_score\":%.1f}",
                  approved ? "true" : "false", score);
+        uint64_t s0 = prof ? now_ns() : 0;
         send_response(client, 200, "OK", "application/json", response_body, keep_alive);
+        if (prof) {
+            send_ns = now_ns() - s0;
+            profile_add(now_ns() - t0, parse_ns, vector_ns, search_ns, send_ns);
+        }
         return keep_alive;
     }
 
+    uint64_t s0 = prof ? now_ns() : 0;
     send_response(client, 404, "Not Found", "application/json", "{\"error\":\"not found\"}", keep_alive);
+    if (prof) {
+        send_ns = now_ns() - s0;
+        profile_add(now_ns() - t0, 0, 0, 0, send_ns);
+    }
     return keep_alive;
 }
 
@@ -1432,6 +1567,10 @@ int main(void) {
     }
     g_candidate_limit = configured_candidate_limit();
     g_approval_threshold = configured_approval_threshold();
+    const char *profile_env = getenv("RINHA_PROFILE_EVERY");
+    if (profile_env && profile_env[0] != '\0') {
+        g_profile_every = strtoull(profile_env, NULL, 10);
+    }
 
     ReferenceSet references = {0};
     if (!load_references(references_path, &references)) {
