@@ -2,6 +2,12 @@ services:
   api1:
     image: srvini/rinha-2026-c:kdtree-idx
     hostname: api1
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     environment:
       PORT: "8080"
       WORKERS: "${WORKERS:-20}"
@@ -18,6 +24,12 @@ services:
   api2:
     image: srvini/rinha-2026-c:kdtree-idx
     hostname: api2
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     environment:
       PORT: "8080"
       WORKERS: "${WORKERS:-20}"
@@ -34,6 +46,12 @@ services:
   lb:
     image: srvini/rinha-2026-c:rust-lb
     command: ["/app/rinha-lb"]
+    logging:
+      driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     environment:
       PORT: "9999"
       BACKEND_POOL: "${BACKEND_POOL:-8}"
