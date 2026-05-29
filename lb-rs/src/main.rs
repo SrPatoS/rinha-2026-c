@@ -1,162 +1,105 @@
 use std::env;
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use std::mem;
+use std::net::TcpListener;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
+use std::thread;
+use std::time::Duration;
 
-const BUFFER_CAP: usize = 32 * 1024;
-const BACKENDS: [&str; 2] = ["api1:8080", "api2:8080"];
+const BACKENDS: [&str; 2] = ["/sockets/api1.sock", "/sockets/api2.sock"];
 
-struct ConnBuffer {
-    data: Vec<u8>,
+struct Upstream {
+    path: &'static str,
+    stream: UnixStream,
+    byte: [u8; 1],
+    control: [u8; 64],
 }
 
-impl ConnBuffer {
-    fn new() -> Self {
-        Self { data: Vec::with_capacity(BUFFER_CAP) }
-    }
-
-    async fn read_http_message(&mut self, stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+impl Upstream {
+    fn connect(path: &'static str) -> UnixStream {
         loop {
-            if let Some(header_end) = find_headers_end(&self.data) {
-                let body_len = content_length(&self.data[..header_end]).unwrap_or(0);
-                let total = header_end + body_len;
-                while self.data.len() < total {
-                    self.read_more(stream).await?;
-                }
-                let message: Vec<u8> = self.data.drain(..total).collect();
-                return Ok(message);
+            match UnixStream::connect(path) {
+                Ok(stream) => return stream,
+                Err(_) => thread::sleep(Duration::from_millis(10)),
             }
-            self.read_more(stream).await?;
         }
     }
 
-    async fn read_more(&mut self, stream: &mut TcpStream) -> io::Result<()> {
-        if self.data.len() >= BUFFER_CAP {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "message too large"));
+    fn new(path: &'static str) -> Self {
+        Self {
+            path,
+            stream: Self::connect(path),
+            byte: [1],
+            control: [0; 64],
         }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
+    }
+
+    fn reconnect(&mut self) {
+        self.stream = Self::connect(self.path);
+    }
+
+    fn send_fd(&mut self, fd: RawFd) -> io::Result<()> {
+        for attempt in 0..2 {
+            if send_fd_raw(self.stream.as_raw_fd(), fd, &mut self.byte, &mut self.control).is_ok() {
+                return Ok(());
+            }
+            if attempt == 0 {
+                self.reconnect();
+            }
         }
-        self.data.extend_from_slice(&chunk[..n]);
-        Ok(())
+        Err(io::Error::last_os_error())
     }
 }
 
-struct BackendConn {
-    addr: &'static str,
-    stream: Option<TcpStream>,
-    buffer: ConnBuffer,
+fn send_fd_raw(sock: RawFd, fd: RawFd, byte: &mut [u8; 1], control: &mut [u8; 64]) -> io::Result<()> {
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: 1,
+    };
+    control.fill(0);
+    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as _) as _ };
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as _) as _;
+        *(libc::CMSG_DATA(cmsg) as *mut RawFd) = fd;
+        if libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
-impl BackendConn {
-    fn new(addr: &'static str) -> Self {
-        Self { addr, stream: None, buffer: ConnBuffer::new() }
-    }
+fn main() -> io::Result<()> {
+    let port = env::var("PORT").unwrap_or_else(|_| "9999".to_string());
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}"))?;
+    listener.set_nonblocking(false)?;
 
-    async fn send_request(&mut self, request: &[u8]) -> io::Result<Vec<u8>> {
-        for _ in 0..2 {
-            if self.stream.is_none() {
-                let stream = TcpStream::connect(self.addr).await?;
-                stream.set_nodelay(true)?;
-                self.stream = Some(stream);
-                self.buffer.data.clear();
-            }
+    let mut upstreams = [Upstream::new(BACKENDS[0]), Upstream::new(BACKENDS[1])];
+    let mut next = 0usize;
+    eprintln!("rinha-fd-lb listening on :{port}");
 
-            let stream = self.stream.as_mut().unwrap();
-            if stream.write_all(request).await.is_err() {
-                self.stream = None;
+    for client in listener.incoming() {
+        let client = match client {
+            Ok(client) => client,
+            Err(err) => {
+                eprintln!("accept error: {err}");
                 continue;
             }
-
-            match self.buffer.read_http_message(stream).await {
-                Ok(response) => return Ok(response),
-                Err(_) => {
-                    self.stream = None;
-                    self.buffer.data.clear();
-                }
-            }
-        }
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "backend failed"))
-    }
-}
-
-struct State {
-    pool: Vec<Arc<Mutex<BackendConn>>>,
-    next: AtomicUsize,
-}
-
-fn find_headers_end(data: &[u8]) -> Option<usize> {
-    data.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
-}
-
-fn content_length(headers: &[u8]) -> Option<usize> {
-    for line in headers.split(|b| *b == b'\n') {
-        let line = trim_cr(line);
-        if line.len() >= 15 && eq_ignore_ascii_case(&line[..15], b"content-length:") {
-            let value = std::str::from_utf8(&line[15..]).ok()?.trim();
-            return value.parse().ok();
-        }
-    }
-    None
-}
-
-fn trim_cr(line: &[u8]) -> &[u8] {
-    line.strip_suffix(b"\r").unwrap_or(line)
-}
-
-fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
-}
-
-async fn handle_client(mut client: TcpStream, state: Arc<State>) {
-    let _ = client.set_nodelay(true);
-    let mut client_buffer = ConnBuffer::new();
-
-    while let Ok(request) = client_buffer.read_http_message(&mut client).await {
-        let index = state.next.fetch_add(1, Ordering::Relaxed) % state.pool.len();
-        let response = {
-            let mut backend = state.pool[index].lock().await;
-            backend.send_request(&request).await
         };
-
-        match response {
-            Ok(bytes) => {
-                if client.write_all(&bytes).await.is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
+        let _ = client.set_nodelay(true);
+        let fd = client.as_raw_fd();
+        let first = next & 1;
+        next = next.wrapping_add(1);
+        if upstreams[first].send_fd(fd).is_err() {
+            let _ = upstreams[first ^ 1].send_fd(fd);
         }
     }
-}
-
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> io::Result<()> {
-    let port = env::var("PORT").unwrap_or_else(|_| "9999".to_string());
-    let pool_per_backend = env::var("BACKEND_POOL")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(24)
-        .max(1);
-
-    let mut pool = Vec::with_capacity(pool_per_backend * BACKENDS.len());
-    for _ in 0..pool_per_backend {
-        for addr in BACKENDS {
-            pool.push(Arc::new(Mutex::new(BackendConn::new(addr))));
-        }
-    }
-
-    let state = Arc::new(State { pool, next: AtomicUsize::new(0) });
-    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    eprintln!("rinha-lb-rs listening on :{port} with {} backend connections", state.pool.len());
-
-    loop {
-        let (client, _) = listener.accept().await?;
-        tokio::spawn(handle_client(client, state.clone()));
-    }
+    Ok(())
 }

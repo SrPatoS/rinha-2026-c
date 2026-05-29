@@ -19,15 +19,15 @@ typedef SOCKET socket_handle_t;
 #define SOCKET_IS_INVALID(s) ((s) == INVALID_SOCKET)
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
-#if defined(__x86_64__) || defined(__amd64__)
-#include <immintrin.h>
-#endif
 typedef int socket_handle_t;
 #define CLOSE_SOCKET close
 #define SOCKET_IS_INVALID(s) ((s) < 0)
@@ -41,6 +41,8 @@ typedef int socket_handle_t;
 #define INDEX_BUCKETS 131072u
 #define KD_PARTITIONS 256u
 #define DEFAULT_CANDIDATE_LIMIT 3000u
+#define MAX_EPOLL_EVENTS 512
+#define MAX_EPOLL_FDS 65536
 
 typedef struct {
     int16_t vector[VECTOR_DIMS];
@@ -77,6 +79,13 @@ typedef struct {
     socket_handle_t server;
     const ReferenceSet *references;
 } WorkerArgs;
+
+#ifndef _WIN32
+typedef struct {
+    char buffer[READ_BUFFER_SIZE];
+    size_t used;
+} EpollConn;
+#endif
 
 typedef struct {
     double amount;
@@ -752,32 +761,6 @@ static bool load_references(const char *path, ReferenceSet *set) {
 }
 
 static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int16_t b[VECTOR_DIMS], uint64_t limit) {
-#if (defined(__x86_64__) || defined(__amd64__)) && defined(__SSE4_1__)
-    (void)limit;
-    __m128i av0 = _mm_loadu_si128((const __m128i *)(const void *)a);
-    __m128i bv0 = _mm_loadu_si128((const __m128i *)(const void *)b);
-    int16_t tail_a[8] = {0};
-    int16_t tail_b[8] = {0};
-    memcpy(tail_a, a + 8, 6 * sizeof(int16_t));
-    memcpy(tail_b, b + 8, 6 * sizeof(int16_t));
-    __m128i av1 = _mm_loadu_si128((const __m128i *)(const void *)tail_a);
-    __m128i bv1 = _mm_loadu_si128((const __m128i *)(const void *)tail_b);
-
-    __m128i d0 = _mm_sub_epi16(av0, bv0);
-    __m128i d1 = _mm_sub_epi16(av1, bv1);
-    __m128i lo0 = _mm_cvtepi16_epi32(d0);
-    __m128i hi0 = _mm_cvtepi16_epi32(_mm_srli_si128(d0, 8));
-    __m128i lo1 = _mm_cvtepi16_epi32(d1);
-    __m128i hi1 = _mm_cvtepi16_epi32(_mm_srli_si128(d1, 8));
-    lo0 = _mm_mullo_epi32(lo0, lo0);
-    hi0 = _mm_mullo_epi32(hi0, hi0);
-    lo1 = _mm_mullo_epi32(lo1, lo1);
-    hi1 = _mm_mullo_epi32(hi1, hi1);
-    __m128i sum = _mm_add_epi32(_mm_add_epi32(lo0, hi0), _mm_add_epi32(lo1, hi1));
-    sum = _mm_hadd_epi32(sum, sum);
-    sum = _mm_hadd_epi32(sum, sum);
-    return (uint64_t)(uint32_t)_mm_cvtsi128_si32(sum);
-#else
     uint64_t sum = 0;
     for (int i = 0; i < VECTOR_DIMS; i++) {
         int diff = (int)a[i] - (int)b[i];
@@ -787,7 +770,6 @@ static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int
         }
     }
     return sum;
-#endif
 }
 
 static void consider_neighbor(const Reference *reference, const int16_t query[VECTOR_DIMS],
@@ -1137,6 +1119,231 @@ static void handle_client(socket_handle_t client, const ReferenceSet *references
     CLOSE_SOCKET(client);
 }
 
+#ifndef _WIN32
+static void set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+}
+
+static int listen_on_unix_socket(const char *path) {
+    int server = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (server < 0) {
+        perror("unix socket");
+        return -1;
+    }
+    unlink(path);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+    if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("unix bind");
+        close(server);
+        return -1;
+    }
+    if (listen(server, 256) < 0) {
+        perror("unix listen");
+        close(server);
+        return -1;
+    }
+    return server;
+}
+
+static int recv_passed_fd(int control) {
+    char byte = 0;
+    struct iovec iov = {.iov_base = &byte, .iov_len = 1};
+    char control_buf[CMSG_SPACE(sizeof(int))];
+    memset(control_buf, 0, sizeof(control_buf));
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control_buf;
+    msg.msg_controllen = sizeof(control_buf);
+    ssize_t n = recvmsg(control, &msg, MSG_DONTWAIT);
+    if (n <= 0) {
+        return -1;
+    }
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        return -1;
+    }
+    int fd = -1;
+    memcpy(&fd, CMSG_DATA(cmsg), sizeof(fd));
+    return fd;
+}
+
+static bool try_process_epoll_request(int fd, EpollConn *conn, const ReferenceSet *references) {
+    conn->buffer[conn->used] = '\0';
+    char *headers_end = strstr(conn->buffer, "\r\n\r\n");
+    if (!headers_end) {
+        return true;
+    }
+    int expected_body = content_length(conn->buffer);
+    size_t header_bytes = (size_t)(headers_end + 4 - conn->buffer);
+    size_t total = header_bytes + (size_t)expected_body;
+    if (conn->used < total) {
+        return true;
+    }
+
+    char saved = conn->buffer[total];
+    conn->buffer[total] = '\0';
+    bool keep_alive = handle_request(fd, references, conn->buffer);
+    conn->buffer[total] = saved;
+    if (!keep_alive) {
+        return false;
+    }
+    if (conn->used > total) {
+        memmove(conn->buffer, conn->buffer + total, conn->used - total);
+    }
+    conn->used -= total;
+    return true;
+}
+
+static void close_epoll_client(int epfd, int fd, EpollConn **conns) {
+    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+    if (fd >= 0 && fd < MAX_EPOLL_FDS) {
+        free(conns[fd]);
+        conns[fd] = NULL;
+    }
+    close(fd);
+}
+
+static bool add_epoll_client(int epfd, int fd, EpollConn **conns) {
+    if (fd < 0 || fd >= MAX_EPOLL_FDS) {
+        close(fd);
+        return false;
+    }
+    set_nonblocking(fd);
+    configure_client_socket(fd);
+    EpollConn *conn = calloc(1, sizeof(*conn));
+    if (!conn) {
+        close(fd);
+        return false;
+    }
+    conns[fd] = conn;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN | EPOLLRDHUP;
+    ev.data.fd = fd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        free(conn);
+        conns[fd] = NULL;
+        close(fd);
+        return false;
+    }
+    return true;
+}
+
+static int run_fd_epoll_server(const char *path, const ReferenceSet *references) {
+    int server = listen_on_unix_socket(path);
+    if (server < 0) {
+        return 1;
+    }
+    int epfd = epoll_create1(0);
+    if (epfd < 0) {
+        perror("epoll_create1");
+        close(server);
+        return 1;
+    }
+    EpollConn **conns = calloc(MAX_EPOLL_FDS, sizeof(*conns));
+    bool *is_control = calloc(MAX_EPOLL_FDS, sizeof(*is_control));
+    if (!conns || !is_control) {
+        close(epfd);
+        close(server);
+        free(conns);
+        free(is_control);
+        return 1;
+    }
+    if (server < MAX_EPOLL_FDS) {
+        is_control[server] = true;
+    }
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.events = EPOLLIN;
+    ev.data.fd = server;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, server, &ev);
+
+    struct epoll_event events[MAX_EPOLL_EVENTS];
+    while (running) {
+        int n = epoll_wait(epfd, events, MAX_EPOLL_EVENTS, 1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
+            if (fd == server) {
+                for (;;) {
+                    int control = accept4(server, NULL, NULL, SOCK_NONBLOCK);
+                    if (control < 0) break;
+                    if (control < MAX_EPOLL_FDS) is_control[control] = true;
+                    ev.events = EPOLLIN | EPOLLRDHUP;
+                    ev.data.fd = control;
+                    epoll_ctl(epfd, EPOLL_CTL_ADD, control, &ev);
+                }
+                continue;
+            }
+            if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+                if (fd >= 0 && fd < MAX_EPOLL_FDS && is_control[fd]) {
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+                    is_control[fd] = false;
+                    close(fd);
+                } else {
+                    close_epoll_client(epfd, fd, conns);
+                }
+                continue;
+            }
+            if (fd >= 0 && fd < MAX_EPOLL_FDS && is_control[fd]) {
+                for (;;) {
+                    int client = recv_passed_fd(fd);
+                    if (client < 0) break;
+                    add_epoll_client(epfd, client, conns);
+                }
+                continue;
+            }
+
+            EpollConn *conn = (fd >= 0 && fd < MAX_EPOLL_FDS) ? conns[fd] : NULL;
+            if (!conn) {
+                close(fd);
+                continue;
+            }
+            bool alive = true;
+            for (;;) {
+                if (conn->used + 1 >= READ_BUFFER_SIZE) {
+                    alive = false;
+                    break;
+                }
+                ssize_t r = recv(fd, conn->buffer + conn->used, READ_BUFFER_SIZE - conn->used - 1, 0);
+                if (r > 0) {
+                    conn->used += (size_t)r;
+                    while (alive && conn->used > 0) {
+                        size_t before = conn->used;
+                        alive = try_process_epoll_request(fd, conn, references);
+                        if (conn->used == before) break;
+                    }
+                    continue;
+                }
+                if (r == 0) alive = false;
+                if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK) alive = false;
+                break;
+            }
+            if (!alive) {
+                close_epoll_client(epfd, fd, conns);
+            }
+        }
+    }
+    close(epfd);
+    close(server);
+    unlink(path);
+    free(conns);
+    free(is_control);
+    return 0;
+}
+#endif
+
 static socket_handle_t listen_on(uint16_t port) {
     socket_handle_t server = socket(AF_INET, SOCK_STREAM, 0);
     if (SOCKET_IS_INVALID(server)) {
@@ -1234,6 +1441,20 @@ int main(void) {
 #endif
         return 1;
     }
+
+#ifndef _WIN32
+    const char *fd_socket = getenv("RINHA_FD_SOCKET");
+    if (fd_socket && fd_socket[0] != '\0') {
+        fprintf(stderr, "rinha-api epoll fd socket %s with %zu references, %u candidates and %.2f threshold\n",
+                fd_socket, references.count, g_candidate_limit, g_approval_threshold);
+        int rc = run_fd_epoll_server(fd_socket, &references);
+        free(references.kd_nodes);
+        free(references.kd_indices);
+        free(references.bucket_offsets);
+        free(references.items);
+        return rc;
+    }
+#endif
 
     socket_handle_t server = listen_on(port);
     if (SOCKET_IS_INVALID(server)) {

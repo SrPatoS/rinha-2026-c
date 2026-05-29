@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.38", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+libc = "0.2"
