@@ -1,6 +1,6 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:kdtree-idx
+    image: srvini/rinha-2026-c:fd-epoll
     hostname: api1
     logging:
       driver: "none"
@@ -9,20 +9,20 @@ services:
         soft: 65535
         hard: 65535
     environment:
-      PORT: "8080"
-      WORKERS: "${WORKERS:-20}"
-      MAX_REFERENCES: "${MAX_REFERENCES:-0}"
+      RINHA_FD_SOCKET: /sockets/api1.sock
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
       APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
       REFERENCES_PATH: /app/resources/references.idx
+    volumes:
+      - sockets:/sockets
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.40}"
+          cpus: "${API_CPUS:-0.47}"
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:kdtree-idx
+    image: srvini/rinha-2026-c:fd-epoll
     hostname: api2
     logging:
       driver: "none"
@@ -31,20 +31,20 @@ services:
         soft: 65535
         hard: 65535
     environment:
-      PORT: "8080"
-      WORKERS: "${WORKERS:-20}"
-      MAX_REFERENCES: "${MAX_REFERENCES:-0}"
+      RINHA_FD_SOCKET: /sockets/api2.sock
       CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
       APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
       REFERENCES_PATH: /app/resources/references.idx
+    volumes:
+      - sockets:/sockets
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.40}"
+          cpus: "${API_CPUS:-0.47}"
           memory: "${API_MEMORY:-150MB}"
 
   lb:
-    image: srvini/rinha-2026-c:rust-lb
+    image: srvini/rinha-2026-c:fd-epoll
     command: ["/app/rinha-lb"]
     logging:
       driver: "none"
@@ -54,7 +54,8 @@ services:
         hard: 65535
     environment:
       PORT: "9999"
-      BACKEND_POOL: "${BACKEND_POOL:-8}"
+    volumes:
+      - sockets:/sockets
     ports:
       - "9999:9999"
     depends_on:
@@ -63,9 +64,17 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${LB_CPUS:-0.20}"
+          cpus: "${LB_CPUS:-0.06}"
           memory: "${LB_MEMORY:-50MB}"
 
 networks:
   default:
     driver: bridge
+
+volumes:
+  sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=10m
