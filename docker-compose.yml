@@ -18,7 +18,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.10}"
+          cpus: "${API_CPUS:-0.01}"
           memory: "${API_MEMORY:-150MB}"
 
   api2:
@@ -40,7 +40,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.10}"
+          cpus: "${API_CPUS:-0.01}"
           memory: "${API_MEMORY:-150MB}"
 
   lb:
@@ -54,8 +54,6 @@ services:
         hard: 65535
     environment:
       PORT: "9999"
-    volumes:
-      - sockets:/sockets
     ports:
       - "9999:9999"
     depends_on:
@@ -64,7 +62,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${LB_CPUS:-0.80}"
+          cpus: "${LB_CPUS:-0.98}"
           memory: "${LB_MEMORY:-50MB}"
 
 networks:
