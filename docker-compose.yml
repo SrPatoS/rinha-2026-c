@@ -4,9 +4,7 @@ services:
     hostname: api1
     logging:
       driver: "none"
-    cpuset: "0"
     ulimits:
-      memlock: -1
       nofile:
         soft: 65535
         hard: 65535
@@ -28,9 +26,7 @@ services:
     hostname: api2
     logging:
       driver: "none"
-    cpuset: "1"
     ulimits:
-      memlock: -1
       nofile:
         soft: 65535
         hard: 65535
@@ -52,9 +48,7 @@ services:
     command: ["/app/rinha-lb"]
     logging:
       driver: "none"
-    cpuset: "2,3"
     ulimits:
-      memlock: -1
       nofile:
         soft: 65535
         hard: 65535
@@ -81,4 +75,4 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: size=4m,mode=0777
+      o: size=10m
