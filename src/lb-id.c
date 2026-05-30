@@ -9,8 +9,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#ifndef SO_REUSEPORT
+#define SO_REUSEPORT 15
+#endif
+
+#ifndef SO_BUSY_POLL
+#define SO_BUSY_POLL 46
+#endif
+
+#ifndef SO_BUSY_POLL_BUDGET
+#define SO_BUSY_POLL_BUDGET 70
+#endif
+
+#ifndef TCP_DEFER_ACCEPT
+#define TCP_DEFER_ACCEPT 9
+#endif
+
+#ifndef TCP_FASTOPEN
+#define TCP_FASTOPEN 23
+#endif
+
+#ifndef TCP_QUICKACK
+#define TCP_QUICKACK 12
+#endif
 
 #define MAX_EVENTS 1024
 #define MAX_FDS 65536
@@ -170,6 +195,29 @@ static bool send_all(int fd, const StaticResponse *response) {
     return true;
 }
 
+static void tune_client_socket(int fd) {
+    int yes = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
+}
+
+static void tune_listener_socket(int fd) {
+    int yes = 1;
+    int defer_accept = 1;
+    int busy_poll_us = 50;
+    int busy_budget = 8;
+    int fast_open = 256;
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
+    setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer_accept, sizeof(defer_accept));
+    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL, &busy_poll_us, sizeof(busy_poll_us));
+    setsockopt(fd, SOL_SOCKET, SO_BUSY_POLL_BUDGET, &busy_budget, sizeof(busy_budget));
+    setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &fast_open, sizeof(fast_open));
+}
+
 static bool process_requests(int fd, Conn *conn) {
     for (;;) {
         conn->buffer[conn->used] = '\0';
@@ -214,9 +262,7 @@ static bool process_requests(int fd, Conn *conn) {
 static int listen_on(int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
-    int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    tune_listener_socket(fd);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -244,6 +290,8 @@ static void close_client(int epfd, int fd, Conn **conns) {
 }
 
 int main(void) {
+    mlockall(MCL_CURRENT | MCL_FUTURE);
+
     const char *port_env = getenv("PORT");
     int port = port_env ? atoi(port_env) : 9999;
     int server = listen_on(port);
@@ -292,8 +340,7 @@ int main(void) {
                         close(client);
                         continue;
                     }
-                    int yes = 1;
-                    setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+                    tune_client_socket(client);
                     Conn *conn = malloc(sizeof(*conn));
                     if (!conn) {
                         close(client);
