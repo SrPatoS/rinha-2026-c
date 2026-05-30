@@ -127,6 +127,39 @@ static uint64_t g_profile_total_hist[PROFILE_BUCKETS];
 static uint64_t g_profile_search_hist[PROFILE_BUCKETS];
 static uint64_t g_profile_send_hist[PROFILE_BUCKETS];
 
+typedef struct {
+    const char *data;
+    size_t len;
+} StaticResponse;
+
+#define STATIC_RESPONSE(value) { value, sizeof(value) - 1u }
+
+static const StaticResponse READY_RESPONSES[2] = {
+    STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"status\":\"ready\"}"),
+    STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: keep-alive\r\n\r\n{\"status\":\"ready\"}")
+};
+
+static const StaticResponse FRAUD_RESPONSES[2][K_NEIGHBORS + 1] = {
+    {
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: close\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: close\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: close\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: close\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: close\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: close\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}")
+    },
+    {
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}"),
+        STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}")
+    }
+};
+
+static const int DISTANCE_DIM_ORDER[VECTOR_DIMS] = {0, 2, 7, 13, 8, 12, 5, 6, 3, 4, 1, 9, 10, 11};
+
 static void on_signal(int signum) {
     (void)signum;
     running = 0;
@@ -587,9 +620,37 @@ static long days_from_civil(int year, unsigned month, unsigned day) {
     return era * 146097L + (long)doe - 719468L;
 }
 
+static inline int two_digits(const char *value) {
+    unsigned a = (unsigned)(value[0] - '0');
+    unsigned b = (unsigned)(value[1] - '0');
+    return (a <= 9u && b <= 9u) ? (int)(a * 10u + b) : -1;
+}
+
 static bool parse_iso_utc(const char *value, int *year, int *month, int *day, int *hour, int *minute) {
-    int second = 0;
-    return sscanf(value, "%d-%d-%dT%d:%d:%dZ", year, month, day, hour, minute, &second) == 6;
+    if (!value ||
+        value[4] != '-' || value[7] != '-' || value[10] != 'T' ||
+        value[13] != ':' || value[16] != ':' || value[19] != 'Z') {
+        return false;
+    }
+
+    int century = two_digits(value);
+    int y = two_digits(value + 2);
+    int mo = two_digits(value + 5);
+    int d = two_digits(value + 8);
+    int h = two_digits(value + 11);
+    int mi = two_digits(value + 14);
+    int sec = two_digits(value + 17);
+    if (century < 0 || y < 0 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
+        h < 0 || h > 23 || mi < 0 || mi > 59 || sec < 0 || sec > 60) {
+        return false;
+    }
+
+    *year = century * 100 + y;
+    *month = mo;
+    *day = d;
+    *hour = h;
+    *minute = mi;
+    return true;
 }
 
 static double minutes_between_iso(const char *older, const char *newer) {
@@ -865,7 +926,8 @@ static bool load_references(const char *path, ReferenceSet *set) {
 
 static uint64_t squared_distance_limited(const int16_t a[VECTOR_DIMS], const int16_t b[VECTOR_DIMS], uint64_t limit) {
     uint64_t sum = 0;
-    for (int i = 0; i < VECTOR_DIMS; i++) {
+    for (int order = 0; order < VECTOR_DIMS; order++) {
+        int i = DISTANCE_DIM_ORDER[order];
         int diff = (int)a[i] - (int)b[i];
         sum += (uint64_t)(diff * diff);
         if (sum >= limit) {
@@ -903,25 +965,21 @@ static void consider_neighbor(const Reference *reference, const int16_t query[VE
     }
 }
 
-static float score_from_neighbors(const NeighborSet *neighbors) {
+static int fraud_count_from_neighbors(const NeighborSet *neighbors) {
     int frauds = 0;
-    int count = 0;
     for (int i = 0; i < K_NEIGHBORS; i++) {
         if (neighbors->dist[i] != UINT64_MAX) {
             frauds += neighbors->fraud[i] ? 1 : 0;
-            count++;
         }
     }
-    if (count == 0) {
-        return 0.0f;
-    }
-    return (float)frauds / (float)count;
+    return frauds;
 }
 
 static uint64_t kd_bounds_distance(const int16_t query[VECTOR_DIMS], const int16_t min[VECTOR_DIMS],
                                    const int16_t max[VECTOR_DIMS], uint64_t limit) {
     uint64_t sum = 0;
-    for (int i = 0; i < VECTOR_DIMS; i++) {
+    for (int order = 0; order < VECTOR_DIMS; order++) {
+        int i = DISTANCE_DIM_ORDER[order];
         int diff = 0;
         if (query[i] < min[i]) {
             diff = (int)min[i] - (int)query[i];
@@ -1021,7 +1079,7 @@ static size_t scan_bucket(const ReferenceSet *set, uint32_t key, const int16_t q
     return scanned;
 }
 
-static float fraud_score_for_vector(const ReferenceSet *set, const float vector[VECTOR_DIMS]) {
+static int fraud_count_for_vector(const ReferenceSet *set, const float vector[VECTOR_DIMS]) {
     int16_t query[VECTOR_DIMS];
     quantize_vector(vector, query);
 
@@ -1030,7 +1088,7 @@ static float fraud_score_for_vector(const ReferenceSet *set, const float vector[
 
     if (set->kd_nodes) {
         kd_search(set, query, &neighbors);
-        return score_from_neighbors(&neighbors);
+        return fraud_count_from_neighbors(&neighbors);
     }
 
     if (set->bucket_offsets) {
@@ -1079,14 +1137,14 @@ done_bucket_scan:
             }
         }
 
-        return score_from_neighbors(&neighbors);
+        return fraud_count_from_neighbors(&neighbors);
     }
 
     for (size_t i = 0; i < set->count; i++) {
         consider_neighbor(&set->items[i], query, &neighbors);
     }
 
-    return score_from_neighbors(&neighbors);
+    return fraud_count_from_neighbors(&neighbors);
 }
 
 static void send_response(socket_handle_t client, int status, const char *status_text, const char *content_type, const char *body, bool keep_alive) {
@@ -1104,6 +1162,10 @@ static void send_response(socket_handle_t client, int status, const char *status
     if (len > 0) {
         send(client, response, (int)len, 0);
     }
+}
+
+static inline void send_static_response(socket_handle_t client, const StaticResponse *response) {
+    send(client, response->data, (int)response->len, 0);
 }
 
 static const char *request_body(char *buffer) {
@@ -1185,7 +1247,7 @@ static bool handle_request(socket_handle_t client, const ReferenceSet *reference
 
     if (strncmp(buffer, "GET /ready ", 11) == 0) {
         uint64_t s0 = prof ? now_ns() : 0;
-        send_response(client, 200, "OK", "application/json", "{\"status\":\"ready\"}", keep_alive);
+        send_static_response(client, &READY_RESPONSES[keep_alive ? 1 : 0]);
         if (prof) {
             send_ns = now_ns() - s0;
             profile_add(now_ns() - t0, 0, 0, 0, send_ns);
@@ -1214,15 +1276,12 @@ static bool handle_request(socket_handle_t client, const ReferenceSet *reference
         }
 
         uint64_t k0 = prof ? now_ns() : 0;
-        float score = fraud_score_for_vector(references, vector);
+        int frauds = fraud_count_for_vector(references, vector);
         if (prof) search_ns = now_ns() - k0;
-        bool approved = score < g_approval_threshold;
-        char response_body[128];
-        snprintf(response_body, sizeof(response_body),
-                 "{\"approved\":%s,\"fraud_score\":%.1f}",
-                 approved ? "true" : "false", score);
+        if (frauds < 0) frauds = 0;
+        if (frauds > K_NEIGHBORS) frauds = K_NEIGHBORS;
         uint64_t s0 = prof ? now_ns() : 0;
-        send_response(client, 200, "OK", "application/json", response_body, keep_alive);
+        send_static_response(client, &FRAUD_RESPONSES[keep_alive ? 1 : 0][frauds]);
         if (prof) {
             send_ns = now_ns() - s0;
             profile_add(now_ns() - t0, parse_ns, vector_ns, search_ns, send_ns);
@@ -1353,11 +1412,12 @@ static bool add_epoll_client(int epfd, int fd, EpollConn **conns) {
     }
     set_nonblocking(fd);
     configure_client_socket(fd);
-    EpollConn *conn = calloc(1, sizeof(*conn));
+    EpollConn *conn = malloc(sizeof(*conn));
     if (!conn) {
         close(fd);
         return false;
     }
+    conn->used = 0;
     conns[fd] = conn;
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
