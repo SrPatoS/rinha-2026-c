@@ -1,30 +1,50 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:edge-prefix
+    image: srvini/rinha-2026-c:edge-id
     hostname: api1
-    command: ["/bin/sh", "-c", "while true; do sleep 3600; done"]
     logging:
       driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    environment:
+      RINHA_FD_SOCKET: /sockets/api1.sock
+      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
+      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
+      REFERENCES_PATH: /app/resources/references.idx
+    volumes:
+      - sockets:/sockets
     deploy:
       resources:
         limits:
           cpus: "${API_CPUS:-0.01}"
-          memory: "${API_MEMORY:-16MB}"
+          memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:edge-prefix
+    image: srvini/rinha-2026-c:edge-id
     hostname: api2
-    command: ["/bin/sh", "-c", "while true; do sleep 3600; done"]
     logging:
       driver: "none"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    environment:
+      RINHA_FD_SOCKET: /sockets/api2.sock
+      CANDIDATE_LIMIT: "${CANDIDATE_LIMIT:-1500}"
+      APPROVAL_THRESHOLD: "${APPROVAL_THRESHOLD:-0.6}"
+      REFERENCES_PATH: /app/resources/references.idx
+    volumes:
+      - sockets:/sockets
     deploy:
       resources:
         limits:
           cpus: "${API_CPUS:-0.01}"
-          memory: "${API_MEMORY:-16MB}"
+          memory: "${API_MEMORY:-150MB}"
 
   lb:
-    image: srvini/rinha-2026-c:edge-prefix
+    image: srvini/rinha-2026-c:edge-id
     command: ["/app/rinha-lb"]
     logging:
       driver: "none"
