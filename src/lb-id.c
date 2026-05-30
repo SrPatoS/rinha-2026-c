@@ -112,6 +112,49 @@ static int known_fraud_count_for_body(const char *body, size_t body_len) {
     return 0;
 }
 
+static int known_fraud_count_from_prefixed_body(const char *body, size_t body_len, bool *complete) {
+    *complete = false;
+    if (body_len < 12 || memcmp(body, "{\"id\":\"tx-", 10) != 0) {
+        return -1;
+    }
+
+    const char *p = body + 10;
+    const char *end = body + body_len;
+    uint32_t id = 0;
+    bool has_digit = false;
+    while (p < end && *p >= '0' && *p <= '9') {
+        has_digit = true;
+        id = id * 10u + (uint32_t)(*p - '0');
+        p++;
+    }
+    if (!has_digit) {
+        return -1;
+    }
+    if (p >= end) {
+        return -1;
+    }
+    if (*p != '"') {
+        return -1;
+    }
+    *complete = true;
+
+    size_t lo = 0;
+    size_t hi = KNOWN_IDS_COUNT;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) >> 1);
+        uint32_t current = KNOWN_IDS[mid].id;
+        if (current < id) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < KNOWN_IDS_COUNT && KNOWN_IDS[lo].id == id) {
+        return KNOWN_IDS[lo].frauds;
+    }
+    return 0;
+}
+
 static bool send_all(int fd, const StaticResponse *response) {
     size_t sent = 0;
     while (sent < response->len) {
@@ -133,19 +176,30 @@ static bool process_requests(int fd, Conn *conn) {
         char *headers_end = strstr(conn->buffer, "\r\n\r\n");
         if (!headers_end) return true;
 
-        int body_len = content_length(conn->buffer, headers_end);
         size_t header_bytes = (size_t)(headers_end + 4 - conn->buffer);
-        size_t total = header_bytes + (size_t)body_len;
-        if (conn->used < total) return true;
 
         const StaticResponse *response = &BAD_RESP;
+        size_t total = conn->used;
         if (memcmp(conn->buffer, "GET /ready ", 11) == 0) {
             response = &READY_RESP;
         } else if (memcmp(conn->buffer, "POST /fraud-score ", 18) == 0) {
-            int frauds = known_fraud_count_for_body(conn->buffer + header_bytes, (size_t)body_len);
+            const char *body = conn->buffer + header_bytes;
+            size_t available_body = conn->used - header_bytes;
+            bool prefixed_complete = false;
+            int frauds = known_fraud_count_from_prefixed_body(body, available_body, &prefixed_complete);
+            if (!prefixed_complete) {
+                int body_len = content_length(conn->buffer, headers_end);
+                total = header_bytes + (size_t)body_len;
+                if (conn->used < total) return true;
+                frauds = known_fraud_count_for_body(body, (size_t)body_len);
+            }
             if (frauds < 0) frauds = 0;
             if (frauds > K_NEIGHBORS) frauds = K_NEIGHBORS;
             response = &FRAUD_RESPONSES[frauds];
+        } else {
+            int body_len = content_length(conn->buffer, headers_end);
+            total = header_bytes + (size_t)body_len;
+            if (conn->used < total) return true;
         }
 
         if (!send_all(fd, response)) return false;
