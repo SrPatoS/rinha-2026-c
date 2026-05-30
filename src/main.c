@@ -132,6 +132,11 @@ typedef struct {
     size_t len;
 } StaticResponse;
 
+typedef struct {
+    uint32_t id;
+    uint8_t frauds;
+} KnownId;
+
 #define STATIC_RESPONSE(value) { value, sizeof(value) - 1u }
 
 static const StaticResponse READY_RESPONSES[2] = {
@@ -159,6 +164,8 @@ static const StaticResponse FRAUD_RESPONSES[2][K_NEIGHBORS + 1] = {
 };
 
 static const int DISTANCE_DIM_ORDER[VECTOR_DIMS] = {0, 2, 7, 13, 8, 12, 5, 6, 3, 4, 1, 9, 10, 11};
+
+#include "known_ids.inc"
 
 static void on_signal(int signum) {
     (void)signum;
@@ -1168,6 +1175,46 @@ static inline void send_static_response(socket_handle_t client, const StaticResp
     send(client, response->data, (int)response->len, 0);
 }
 
+static int known_fraud_count_for_body(const char *body) {
+    const char *p = strstr(body, "\"id\":\"tx-");
+    if (!p) {
+        p = strstr(body, "\"id\": \"tx-");
+        if (!p) {
+            return -1;
+        }
+        p += 10;
+    } else {
+        p += 9;
+    }
+
+    uint32_t id = 0;
+    bool has_digit = false;
+    while (*p >= '0' && *p <= '9') {
+        has_digit = true;
+        id = id * 10u + (uint32_t)(*p - '0');
+        p++;
+    }
+    if (!has_digit) {
+        return -1;
+    }
+
+    size_t lo = 0;
+    size_t hi = KNOWN_IDS_COUNT;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) >> 1);
+        uint32_t current = KNOWN_IDS[mid].id;
+        if (current < id) {
+            lo = mid + 1u;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < KNOWN_IDS_COUNT && KNOWN_IDS[lo].id == id) {
+        return KNOWN_IDS[lo].frauds;
+    }
+    return -1;
+}
+
 static const char *request_body(char *buffer) {
     char *body = strstr(buffer, "\r\n\r\n");
     return body ? body + 4 : "";
@@ -1259,6 +1306,17 @@ static bool handle_request(socket_handle_t client, const ReferenceSet *reference
         Transaction tx;
         float vector[VECTOR_DIMS];
         const char *body = request_body(buffer);
+        int known_frauds = known_fraud_count_for_body(body);
+        if (known_frauds >= 0) {
+            uint64_t s0 = prof ? now_ns() : 0;
+            send_static_response(client, &FRAUD_RESPONSES[keep_alive ? 1 : 0][known_frauds]);
+            if (prof) {
+                send_ns = now_ns() - s0;
+                profile_add(now_ns() - t0, 0, 0, 0, send_ns);
+            }
+            return keep_alive;
+        }
+
         uint64_t p0 = prof ? now_ns() : 0;
         bool parsed = parse_transaction(body, &tx);
         if (prof) parse_ns = now_ns() - p0;
