@@ -1,6 +1,6 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:fd-id-edge
+    image: srvini/rinha-2026-c:fd-id-ready
     hostname: api1
     cpuset: "1"
     logging:
@@ -23,7 +23,7 @@ services:
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:fd-id-edge
+    image: srvini/rinha-2026-c:fd-id-ready
     hostname: api2
     cpuset: "2"
     logging:
@@ -46,7 +46,7 @@ services:
           memory: "${API_MEMORY:-150MB}"
 
   lb:
-    image: srvini/rinha-2026-c:fd-id-edge
+    image: srvini/rinha-2026-c:fd-id-ready
     command: ["/app/rinha-lb"]
     cpuset: "3"
     logging:
