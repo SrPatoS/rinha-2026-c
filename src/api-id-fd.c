@@ -42,6 +42,9 @@ typedef struct {
 
 #define STATIC_RESPONSE(value) { value, sizeof(value) - 1u }
 
+static const StaticResponse READY_RESP =
+    STATIC_RESPONSE("HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"status\":\"ready\"}");
+
 static const StaticResponse BAD_RESP =
     STATIC_RESPONSE("HTTP/1.1 400 Bad Request\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}");
 
@@ -117,6 +120,11 @@ static bool send_all(int fd, const StaticResponse *response) {
 }
 
 static bool process_request(int fd, Conn *conn) {
+    if (conn->used >= 11 && memcmp(conn->buffer, "GET /ready ", 11) == 0) {
+        if (!memmem(conn->buffer, conn->used, "\r\n\r\n", 4)) return true;
+        return send_all(fd, &READY_RESP);
+    }
+
     bool complete = false;
     int frauds = known_fraud_count_from_prefix(conn->buffer, conn->used, &complete);
     if (!complete) return true;
