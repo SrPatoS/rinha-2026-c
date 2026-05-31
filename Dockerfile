@@ -1,6 +1,6 @@
 FROM alpine:3.20 AS build
 
-RUN apk add --no-cache build-base
+RUN apk add --no-cache build-base linux-headers liburing-dev
 WORKDIR /app
 COPY Makefile .
 COPY src ./src
@@ -9,6 +9,7 @@ RUN make
 FROM alpine:3.20
 
 WORKDIR /app
+RUN apk add --no-cache liburing
 COPY --from=build /app/build/rinha-api /app/rinha-api
 COPY --from=build /app/build/rinha-lb /app/rinha-lb
 RUN mkdir -p /app/resources
