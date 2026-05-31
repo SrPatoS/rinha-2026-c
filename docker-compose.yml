@@ -1,7 +1,8 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:kd32-neighbor
+    image: srvini/rinha-2026-c:fd-id-edge
     hostname: api1
+    cpuset: "1"
     logging:
       driver: "none"
     ulimits:
@@ -18,12 +19,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.47}"
+          cpus: "${API_CPUS:-0.475}"
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:kd32-neighbor
+    image: srvini/rinha-2026-c:fd-id-edge
     hostname: api2
+    cpuset: "2"
     logging:
       driver: "none"
     ulimits:
@@ -40,12 +42,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.47}"
+          cpus: "${API_CPUS:-0.475}"
           memory: "${API_MEMORY:-150MB}"
 
   lb:
-    image: srvini/rinha-2026-c:kd32-neighbor
+    image: srvini/rinha-2026-c:fd-id-edge
     command: ["/app/rinha-lb"]
+    cpuset: "3"
     logging:
       driver: "none"
     ulimits:
@@ -64,7 +67,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${LB_CPUS:-0.06}"
+          cpus: "${LB_CPUS:-0.05}"
           memory: "${LB_MEMORY:-50MB}"
 
 networks:
