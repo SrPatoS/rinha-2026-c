@@ -1,7 +1,8 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:edge-no-fastopen
+    image: srvini/rinha-2026-c:fd-id-edge
     hostname: api1
+    cpuset: "1"
     logging:
       driver: "none"
     ulimits:
@@ -18,12 +19,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.01}"
+          cpus: "${API_CPUS:-0.475}"
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:edge-no-fastopen
+    image: srvini/rinha-2026-c:fd-id-edge
     hostname: api2
+    cpuset: "2"
     logging:
       driver: "none"
     ulimits:
@@ -40,12 +42,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${API_CPUS:-0.01}"
+          cpus: "${API_CPUS:-0.475}"
           memory: "${API_MEMORY:-150MB}"
 
   lb:
-    image: srvini/rinha-2026-c:edge-no-fastopen
+    image: srvini/rinha-2026-c:fd-id-edge
     command: ["/app/rinha-lb"]
+    cpuset: "3"
     logging:
       driver: "none"
     ulimits:
@@ -54,6 +57,8 @@ services:
         hard: 65535
     environment:
       PORT: "9999"
+    volumes:
+      - sockets:/sockets
     ports:
       - "9999:9999"
     depends_on:
@@ -62,7 +67,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "${LB_CPUS:-0.98}"
+          cpus: "${LB_CPUS:-0.05}"
           memory: "${LB_MEMORY:-50MB}"
 
 networks:
