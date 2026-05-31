@@ -39,6 +39,9 @@
 #define DEFAULT_BACKLOG 65535
 #define DEFAULT_ACCEPT_BATCH 128
 
+static const char READY_RESPONSE[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"status\":\"ready\"}";
+
 typedef struct {
     int fd;
     char byte;
@@ -146,6 +149,26 @@ static void tune_client(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &yes, sizeof(yes));
 }
 
+static bool maybe_handle_ready(int fd) {
+    char peek[16];
+    ssize_t n = recv(fd, peek, sizeof(peek), MSG_PEEK | MSG_DONTWAIT);
+    if (n < 11) return false;
+    if (memcmp(peek, "GET /ready ", 11) != 0) return false;
+
+    size_t sent = 0;
+    size_t len = sizeof(READY_RESPONSE) - 1u;
+    while (sent < len) {
+        ssize_t written = send(fd, READY_RESPONSE + sent, len - sent, MSG_NOSIGNAL);
+        if (written > 0) {
+            sent += (size_t)written;
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        break;
+    }
+    return true;
+}
+
 static int listen_tcp(int port, int backlog) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) return -1;
@@ -211,6 +234,11 @@ int main(void) {
             }
             accepted++;
             tune_client(client);
+
+            if (maybe_handle_ready(client)) {
+                close(client);
+                continue;
+            }
 
             int target = rr;
             rr = (rr + 1) % backend_count;
