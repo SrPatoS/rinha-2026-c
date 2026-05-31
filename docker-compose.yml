@@ -1,6 +1,6 @@
 services:
   api1:
-    image: srvini/rinha-2026-c:edge-id
+    image: srvini/rinha-2026-c:edge-nobusy
     hostname: api1
     logging:
       driver: "none"
@@ -22,7 +22,7 @@ services:
           memory: "${API_MEMORY:-150MB}"
 
   api2:
-    image: srvini/rinha-2026-c:edge-id
+    image: srvini/rinha-2026-c:edge-nobusy
     hostname: api2
     logging:
       driver: "none"
@@ -44,7 +44,7 @@ services:
           memory: "${API_MEMORY:-150MB}"
 
   lb:
-    image: srvini/rinha-2026-c:edge-id
+    image: srvini/rinha-2026-c:edge-nobusy
     command: ["/app/rinha-lb"]
     logging:
       driver: "none"
