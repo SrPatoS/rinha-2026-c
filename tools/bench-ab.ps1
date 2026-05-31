@@ -141,11 +141,11 @@ function Read-Metrics {
 }
 
 function Summarize {
-  param([string]$TestName, [object[]]$Rows)
+  param([string]$CaseName, [object[]]$Rows)
   $usable = @($Rows | Select-Object -Skip $DiscardFirst)
   if ($usable.Count -eq 0) { $usable = @($Rows) }
   [pscustomobject]@{
-    name = $TestName
+    name = $CaseName
     roundsUsed = $usable.Count
     avgMs = ($usable | Measure-Object avg -Average).Average
     p95Ms = ($usable | Measure-Object p95 -Average).Average
@@ -176,8 +176,8 @@ foreach ($pair in $pairs) {
 }
 
 $summaryRows = @(
-  Summarize -TestName "baseline" -Rows $allRows["baseline"],
-  Summarize -TestName "candidate" -Rows $allRows["candidate"]
+  Summarize -CaseName "baseline" -Rows $allRows["baseline"],
+  Summarize -CaseName "candidate" -Rows $allRows["candidate"]
 )
 
 $summaryFile = Join-Path $outPath ("summary-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".json")
